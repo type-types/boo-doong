@@ -1,0 +1,274 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>부등부등 웹스터디 - 채팅 테스트</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; padding-bottom: env(safe-area-inset-bottom, 16px); }
+      .row { display: flex; gap: 8px; margin-bottom: 8px; }
+      .layout { display:grid; grid-template-columns: 240px 1fr; gap:16px; }
+      .sidebar { border:1px solid #eee; border-radius:8px; padding:10px; height:420px; overflow:auto; }
+      .participants { display:flex; flex-direction:column; gap:8px; }
+      .pill { border:1px solid #ddd; border-radius:10px; padding:10px; font-size:12px; text-align:left; }
+      .pill.host { background:#fff7e6; border-color:#ffd591; }
+      .chatbox { border:1px solid #eee; border-radius:8px; padding:10px; height:520px; display:flex; flex-direction:column; }
+      #chat { flex:1; overflow:auto; padding-right:6px; }
+      .bubble { max-width:70%; margin:6px 0; padding:8px 10px; border-radius:14px; line-height:1.4; word-break: break-word; }
+      .me { align-self:flex-end; background:#e6f4ff; border:1px solid #bae0ff; }
+      .other { align-self:flex-start; background:#f5f5f5; border:1px solid #e5e5e5; }
+      .system { align-self:center; font-size:12px; color:#888; background:transparent; border:none; }
+      .typing { font-size:12px; color:#666; height:18px; }
+      .llm { border:1px solid #eee; border-radius:8px; padding:10px; margin-top:12px; display:flex; flex-direction:column; gap:8px; grid-column: 1 / -1; }
+      .llm-log { max-height:280px; overflow:auto; border:1px solid #f0f0f0; border-radius:6px; padding:8px; font-size:14px; }
+
+      /* Responsive */
+      @media (max-width: 768px) {
+        .layout { grid-template-columns: 1fr; }
+        .sidebar { height: auto; }
+        /* 모바일에서 잘리지 않도록 고정 높이 제거하고 내부 스크롤로 처리 */
+        .chatbox { height: auto; }
+        #chat { max-height: 40vh; }
+        .llm-log { max-height: 30vh; }
+      }
+    </style>
+  </head>
+  <body>
+    <h2><a href="/rooms.html" style="text-decoration:none">부등부등 웹스터디</a> - 채팅 테스트</h2>
+    <div id="nickbar" style="color:#666; margin:-8px 0 12px 0;">닉네임: -</div>
+    <div class="row">
+      <div id="roomInfo" style="flex:1; color:#555;">
+        방: <span id="roomLabel">-</span> · 역할: <span id="roleLabel">-</span>
+      </div>
+      <button id="leave">나가기</button>
+    </div>
+    <div class="layout">
+      <aside class="sidebar">
+        <div style="font-weight:600; margin-bottom:8px;">참가자</div>
+        <div id="participants" class="participants"></div>
+      </aside>
+      <section class="chatbox">
+        <div id="chat"></div>
+        <div id="typing" class="typing"></div>
+        <div class="row">
+          <input id="text" placeholder="메시지를 입력하세요" style="flex:1"/>
+          <button id="send">전송</button>
+        </div>
+      </section>
+      <!-- LLM 개인 대화: 동일 컨테이너 내 하단 전체 폭 -->
+      <div class="llm">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <strong>LLM 개인 대화</strong>
+          <span id="llmStatus" class="muted" style="font-size:12px; color:#666;">대기</span>
+        </div>
+        <div id="llmLog" class="llm-log"></div>
+        <div class="row">
+          <input id="llmInput" placeholder="LLM에게 질문을 입력하세요" style="flex:1"/>
+          <button id="llmSend">질문</button>
+        </div>
+      </div>
+    </div>
+    <dialog id="nickDialog">
+      <form method="dialog" style="min-width:300px">
+        <h3>닉네임 설정</h3>
+        <input id="nickInput" placeholder="닉네임을 입력하세요" style="width:100%; padding:8px"/>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+          <button type="button" id="saveNick">저장</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+    <script>
+      const socket = io();
+      const chat = document.getElementById('chat');
+      const participantsEl = document.getElementById('participants');
+      const typingEl = document.getElementById('typing');
+      const roomLabel = document.getElementById('roomLabel');
+      const roleLabel = document.getElementById('roleLabel');
+      const text = document.getElementById('text');
+      const sendBtn = document.getElementById('send');
+      const leaveBtn = document.getElementById('leave');
+      const llmInput = document.getElementById('llmInput');
+      const llmSend = document.getElementById('llmSend');
+      const llmLog = document.getElementById('llmLog');
+      const llmStatus = document.getElementById('llmStatus');
+      function ensureNickname() {
+        const saved = localStorage.getItem('nickname') || '';
+        document.getElementById('nickbar').textContent = '닉네임: ' + (saved || '-');
+        if (!saved) {
+          document.getElementById('nickDialog').showModal();
+          document.getElementById('nickInput').value = '';
+        }
+      }
+
+      const params = new URLSearchParams(location.search);
+      let currentRoomId = '';
+      if (params.get('roomId')) currentRoomId = params.get('roomId');
+      roomLabel.textContent = currentRoomId || '-';
+      // 닉네임/역할은 절대 URL에서 읽지 않음 (공유 안전)
+      const currentRole = localStorage.getItem('nextRole') || localStorage.getItem('lastRole') || 'player';
+      roleLabel.textContent = currentRole === 'host' ? '방장' : '참가자';
+      ensureNickname();
+      function tryAutoJoin() {
+        const rid = currentRoomId.trim();
+        const saved = (localStorage.getItem('nickname') || '').trim();
+        if (!rid || !saved) return;
+        const doJoin = () => {
+          socket.emit('join', { roomId: rid, nickname: saved, role: currentRole });
+        };
+        if (socket.connected) doJoin();
+        else socket.once('connect', doJoin);
+      }
+      // URL에 roomId가 있으면 자동 입장
+      if (currentRoomId) tryAutoJoin();
+      document.getElementById('saveNick').onclick = () => {
+        const v = document.getElementById('nickInput').value.trim();
+        if (!v) return alert('닉네임을 입력하세요');
+        localStorage.setItem('nickname', v);
+        document.getElementById('nickbar').textContent = '닉네임: ' + v;
+        document.getElementById('nickDialog').close();
+        // 닉네임을 방금 설정했고 roomId가 있으면 바로 입장
+        if (currentRoomId) tryAutoJoin();
+      };
+      socket.on('joined', (p) => console.log('joined', p));
+      socket.on('participants', ({ participants }) => {
+        participantsEl.innerHTML = '';
+        participants.forEach(p => {
+          const div = document.createElement('div');
+          div.className = 'pill ' + (p.role === 'host' ? 'host' : '');
+          div.textContent = (p.role === 'host' ? '방장 ' : '') + p.nickname;
+          participantsEl.appendChild(div);
+        });
+      });
+      leaveBtn.onclick = () => {
+        socket.emit('leave');
+        setTimeout(()=> { location.href = '/rooms.html'; }, 100);
+      };
+      function doSendChat() {
+        const val = text.value.trim();
+        if (!val) return;
+        socket.emit('chat_send', { roomId: currentRoomId, text: val });
+        text.value = '';
+        socket.emit('typing', { roomId: currentRoomId, typing: false });
+      }
+      sendBtn.onclick = () => { doSendChat(); };
+      let typingTimer = null;
+      const stopTypingSoon = () => {
+        if (typingTimer) clearTimeout(typingTimer);
+        typingTimer = setTimeout(() => {
+          socket.emit('typing', { roomId: currentRoomId, typing: false });
+        }, 1200);
+      };
+      text.addEventListener('input', () => {
+        socket.emit('typing', { roomId: currentRoomId, typing: true });
+        stopTypingSoon();
+      });
+      let composingChat = false;
+      let pendingEnterChat = false;
+      text.addEventListener('compositionstart', () => { composingChat = true; });
+      text.addEventListener('compositionend', () => { composingChat = false; if (pendingEnterChat) { pendingEnterChat = false; doSendChat(); } });
+      text.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          if (composingChat) { pendingEnterChat = true; return; }
+          doSendChat();
+        }
+      });
+      text.addEventListener('blur', () => {
+        socket.emit('typing', { roomId: currentRoomId, typing: false });
+      });
+
+      const llmMessages = [];
+      let llmBusy = false;
+      function renderLlm() {
+        llmLog.innerHTML = '';
+        llmMessages.forEach(m => {
+          const el = document.createElement('div');
+          if (m.role === 'assistant') { el.className = 'bubble other'; el.textContent = `LLM: ${m.text}`; }
+          else if (m.role === 'user') { el.className = 'bubble me'; el.textContent = `나: ${m.text}`; }
+          else { el.className = 'bubble system'; el.textContent = m.text; }
+          llmLog.appendChild(el);
+        });
+        llmLog.scrollTop = llmLog.scrollHeight;
+      }
+      async function sendToLLM() {
+        if (llmBusy) return;
+        const q = (llmInput.value || '').trim();
+        if (!q) return;
+        llmBusy = true;
+        llmInput.disabled = true;
+        llmSend.disabled = true;
+        llmStatus.textContent = '요청 중...';
+        llmMessages.push({ role: 'user', text: q });
+        llmInput.value = '';
+        renderLlm();
+        try {
+          // 최근 대화 12개만 전송하여 컨텍스트 유지
+          const history = llmMessages.slice(-12).map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.text }));
+          const res = await fetch('/api/llm/chat', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ messages: history }) });
+          const data = await res.json();
+          llmMessages.push({ role: 'assistant', text: data.reply || '(응답 없음)' });
+          renderLlm();
+        } catch (e) {
+          llmMessages.push({ role: 'system', text: 'LLM 요청 실패' });
+          renderLlm();
+        } finally {
+          llmStatus.textContent = '대기';
+          llmBusy = false;
+          llmInput.disabled = false;
+          llmSend.disabled = false;
+          llmInput.focus();
+        }
+      }
+      llmSend.addEventListener('click', sendToLLM);
+      let composingLLM = false;
+      let pendingEnterLLM = false;
+      llmInput.addEventListener('compositionstart', () => { composingLLM = true; });
+      llmInput.addEventListener('compositionend', () => { composingLLM = false; if (pendingEnterLLM) { pendingEnterLLM = false; sendToLLM(); } });
+      llmInput.addEventListener('keydown', (e) => {
+        if (llmBusy) { if (e.key === 'Enter') e.preventDefault(); return; }
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (composingLLM) { pendingEnterLLM = true; return; } sendToLLM(); }
+      });
+
+      socket.on('chat', (msg) => {
+        const div = document.createElement('div');
+        if (msg.role === 'system') {
+          div.className = 'bubble system';
+          div.textContent = msg.text;
+        } else {
+          const isMe = msg.from === (localStorage.getItem('nickname')||'');
+          div.className = 'bubble ' + (isMe ? 'me' : 'other');
+          div.textContent = `${msg.from}: ${msg.text}`;
+        }
+        chat.appendChild(div);
+        chat.scrollTop = chat.scrollHeight;
+      });
+      socket.on('chat_history', ({ items }) => {
+        chat.innerHTML = '';
+        items.forEach(msg => {
+          const div = document.createElement('div');
+          if (msg.role === 'system') {
+            div.className = 'bubble system';
+            div.textContent = msg.text;
+          } else {
+            const isMe = msg.from === (localStorage.getItem('nickname')||'');
+            div.className = 'bubble ' + (isMe ? 'me' : 'other');
+            div.textContent = `${msg.from}: ${msg.text}`;
+          }
+          chat.appendChild(div);
+        });
+        chat.scrollTop = chat.scrollHeight;
+      });
+      socket.on('typing_state', ({ nickname, typing }) => {
+        if (typing) typingEl.textContent = `${nickname} 님이 입력 중...`;
+        else typingEl.textContent = '';
+      });
+      socket.on('error_msg', (e) => alert(e.message));
+    </script>
+  </body>
+  </html>
+
+
+
+

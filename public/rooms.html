@@ -1,0 +1,183 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>공부방 목록</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }
+      h2 { margin-bottom: 12px; }
+      .toolbar { display:flex; gap:8px; margin-bottom: 12px; }
+      .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap:12px; }
+      .card { border:1px solid #ddd; border-radius:10px; padding:12px; }
+      .muted { color:#666; font-size:12px; }
+      input, select, button { padding:8px; }
+      /* Safari/WebKit에서 초 필드 숨김 */
+      input[type="time"]::-webkit-datetime-edit-second-field { display: none; }
+      input[type="time"]::-webkit-datetime-edit-millisecond-field { display: none; }
+      input[type="time"] { width: 130px; }
+    </style>
+  </head>
+  <body>
+    <h2>공부방 목록</h2>
+    <div id="nickbar" class="muted" style="margin:-8px 0 12px 0;">닉네임: -</div>
+    <div class="toolbar">
+      <button id="openCreate">방 개설</button>
+      <a href="/index.html" style="margin-left:auto">채팅 테스트로</a>
+    </div>
+    <dialog id="nickDialog">
+      <form method="dialog" style="min-width:300px">
+        <h3>닉네임 설정</h3>
+        <input id="nickInput" placeholder="닉네임을 입력하세요" style="width:100%; padding:8px"/>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+          <button type="button" id="saveNick">저장</button>
+        </div>
+      </form>
+    </dialog>
+    
+    <dialog id="createDialog">
+      <form method="dialog" style="min-width:320px">
+        <h3>방 만들기</h3>
+        <div style="display:grid; gap:8px;">
+          <input id="title" placeholder="방 제목" required />
+          <label>최대 인원
+            <select id="maxMembers">
+              <option value="4">4</option>
+              <option value="6" selected>6</option>
+              <option value="8">8</option>
+              <option value="10">10</option>
+              <option value="12">12</option>
+            </select>
+          </label>
+          <label>공부 시간
+            <div style="display:flex; gap:8px; align-items:center;">
+              <input id="studyStart" type="time" step="60" placeholder="00:00" /> ~ <input id="studyEnd" type="time" step="60" placeholder="00:00" />
+            </div>
+          </label>
+          <label style="display:flex; gap:8px; align-items:center;">
+            <input id="noteRequired" type="checkbox"/> 학습 노트 사용
+          </label>
+          <label style="display:flex; gap:8px; align-items:center;">
+            <input id="isPrivate" type="checkbox"/> 비공개 방
+          </label>
+        </div>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+          <button type="button" id="cancelCreate">취소</button>
+          <button type="button" id="create">생성</button>
+        </div>
+      </form>
+    </dialog>
+    <div id="list" class="grid"></div>
+
+    <script>
+      const $ = (sel) => document.querySelector(sel);
+      function ensureNickname() {
+        const saved = localStorage.getItem('nickname') || '';
+        document.getElementById('nickbar').textContent = '닉네임: ' + (saved || '-');
+        if (!saved) {
+          $('#nickDialog').showModal();
+          $('#nickInput').value = '';
+        }
+      }
+      ensureNickname();
+      $('#saveNick').addEventListener('click', () => {
+        const v = $('#nickInput').value.trim();
+        if (!v) return alert('닉네임을 입력하세요');
+        localStorage.setItem('nickname', v);
+        document.getElementById('nickbar').textContent = '닉네임: ' + v;
+        $('#nickDialog').close();
+      });
+
+      async function fetchRooms() {
+        const res = await fetch('/api/rooms');
+        const data = await res.json();
+        render(data.items || []);
+      }
+
+      function render(items) {
+        const list = $('#list');
+        list.innerHTML = '';
+        if (!items.length) {
+          const empty = document.createElement('div');
+          empty.className = 'muted';
+          empty.textContent = '아직 방이 없습니다. 방을 개설해보세요!';
+          list.appendChild(empty);
+          return;
+        }
+        items.sort((a,b)=> (b.createdAt||0)-(a.createdAt||0));
+        items.forEach(room => {
+          const card = document.createElement('div');
+          card.className = 'card';
+          const cap = `${room.players}/${room.maxMembers}`;
+          card.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+              <strong>${room.title}</strong>
+              <span class="muted">${cap}</span>
+            </div>
+            <div class="muted" style="margin-top:6px;">방 ID: ${room.id}</div>
+            <div style="margin-top:10px; display:flex; gap:8px;">
+              <button data-join="${room.id}">입장</button>
+            </div>
+          `;
+          list.appendChild(card);
+        });
+        list.querySelectorAll('button[data-join]').forEach(btn => {
+          btn.addEventListener('click', () => joinRoom(btn.getAttribute('data-join')));
+        });
+      }
+
+      function pad(n){ return String(n).padStart(2,'0'); }
+      function formatHM(d){ return `${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+      function setDefaultTimes() {
+        const startEl = $('#studyStart');
+        const endEl = $('#studyEnd');
+        const now = new Date();
+        // 시간 단위 올림: 정시가 아니면 다음 정시로 이동
+        if (now.getMinutes() > 0 || now.getSeconds() > 0 || now.getMilliseconds() > 0) {
+          now.setHours(now.getHours() + 1);
+        }
+        now.setMinutes(0);
+        now.setSeconds(0,0);
+        const end = new Date(now.getTime() + 60*60*1000);
+        startEl.value = formatHM(now);
+        endEl.value = formatHM(end);
+      }
+
+      async function createRoom() {
+        const title = $('#title').value.trim() || '새 공부방';
+        const maxMembers = Number($('#maxMembers').value);
+        const studyStart = ($('#studyStart').value || '').slice(0,5);
+        const studyEnd = ($('#studyEnd').value || '').slice(0,5);
+        const noteRequired = $('#noteRequired').checked;
+        const isPrivate = $('#isPrivate').checked;
+        const payload = { title, maxMembers, studyStart, studyEnd, noteRequired, isPrivate };
+        const res = await fetch('/api/rooms', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload)});
+        const room = await res.json();
+        $('#createDialog').close();
+        await fetchRooms();
+        // 방 만든 사람은 방장(호스트)로 입장
+        joinRoom(room.id, true);
+      }
+
+      function joinRoom(roomId, asHost = false) {
+        const nickname = (localStorage.getItem('nickname') || '').trim();
+        if (!nickname) { $('#nickDialog').showModal(); return; }
+        localStorage.setItem('nickname', nickname);
+        const role = asHost ? 'host' : 'player';
+        // 역할은 URL이 아닌 로컬에만 저장
+        localStorage.setItem('nextRole', role);
+        localStorage.setItem('lastRole', role);
+        const url = `/index.html?roomId=${encodeURIComponent(roomId)}`;
+        location.href = url;
+      }
+
+      $('#openCreate').addEventListener('click', () => { setDefaultTimes(); $('#createDialog').showModal(); });
+      $('#cancelCreate').addEventListener('click', () => $('#createDialog').close());
+      $('#create').addEventListener('click', createRoom);
+      fetchRooms();
+      setInterval(fetchRooms, 3000);
+    </script>
+  </body>
+  </html>
+
+
